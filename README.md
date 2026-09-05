@@ -6,6 +6,7 @@ Local Python workspace for NSE research.
 
 - [Day 1](#day-1-project-setup-and-market-data-pipeline): Project setup and market data pipeline
 - [Day 2](#day-2-bar-indicators-from-1-minute-ohlcv): Bar indicators from 1-minute OHLCV
+- [Day 3](#day-3-future-return-targets-and-date-splits): Future-return targets and date splits
 
 No ML, strategy discovery, backtesting, or live trading yet.
 
@@ -116,5 +117,47 @@ SELECT * FROM read_parquet('data/processed/RELIANCE_1min_indicators.parquet') LI
 ```
 
 **Rules:** sort by timestamp; no look-ahead; no forward-fill; warm-up NaNs kept; original OHLCV preserved; indicators reset at each trading-session boundary. Re-runs overwrite processed files (no duplication).
+
+## Day 3: Future-return targets and date splits
+
+Append future-return target columns to each stock's processed indicators, and define reusable train/validation/test date splits. Each stock is processed independently (never load all ~27M rows at once). Indicator Parquet files are left unchanged.
+
+| Script | Purpose |
+|---|---|
+| `src/data/build_targets.py` | Append future-return targets, validate, write targets Parquet |
+| `src/data/date_splits.py` | Train/validation/test date ranges + timestamp classifier |
+| `src/data/kite_ohlcv.py` | Shared Parquet I/O (reused from Day 1) |
+
+**Targets:** `future_return_5m`, `future_return_15m`, `future_return_30m`, `future_return_60m`.
+
+**How each is calculated** (on 1-minute bars):
+
+**Session boundaries:** Future-return targets are computed **within each trading session** (calendar date of `timestamp`). `future_return_Nm` at row `t` uses the close `N` bars *later in the same session* — `close.groupby(day).shift(-N)`. The last `N` bars of a session have no future bar in the same session, so their target is NaN. A target **never** uses the next session's open or close, so there is no cross-session look-ahead leakage.
+
+| Column | Calculation |
+|---|---|
+| `future_return_Nm` | `(close.shift(-N) / close) - 1` for N = 5, 15, 30, 60; **within session** (NaN when the future bar is missing or falls in another session) |
+
+**Date splits** (inclusive, by calendar date; no rows are removed or duplicated — this is metadata for downstream filtering):
+
+| Split | Range |
+|---|---|
+| train | 2023-09-04 → 2025-09-03 |
+| validation | 2025-09-04 → 2026-03-03 |
+| test | 2026-03-04 → 2026-09-04 |
+
+**Output:** `data/processed/{SYMBOL}_1min_targets.parquet` (gitignored) — 31 columns (27 indicators + 4 targets).
+
+```bash
+.venv/bin/python -m src.data.build_targets
+.venv/bin/python -m src.data.build_targets --symbol RELIANCE
+```
+
+```sql
+SELECT timestamp, close, future_return_5m, future_return_60m
+FROM read_parquet('data/processed/RELIANCE_1min_targets.parquet') LIMIT 5;
+```
+
+**Rules:** sort by timestamp; no look-ahead across sessions; existing indicator columns preserved unchanged; target NaNs at session tails kept (no forward-fill); re-runs overwrite targets files (no duplication).
 
 **Never commit:** `.env`, `.kite_session`, `data/raw/`, or `data/processed/`.
