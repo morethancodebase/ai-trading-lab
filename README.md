@@ -2,9 +2,12 @@
 
 Building an AI-powered trading research system from scratch: market data, backtesting, ML, and paper trading.
 
-Local Python workspace for NSE research. **Day 1** sets up the environment and downloads **3 years of 1-minute OHLCV for NIFTY 100** via Zerodha Kite Connect, stored as Parquet and queryable with DuckDB.
+Local Python workspace for NSE research.
 
-No ML, indicators, backtesting, or live trading yet.
+- [Day 1](#day-1-project-setup-and-market-data-pipeline): Project setup and market data pipeline
+- [Day 2](#day-2-bar-indicators-from-1-minute-ohlcv): Bar indicators from 1-minute OHLCV
+
+No ML, strategy discovery, backtesting, or live trading yet.
 
 ## Requirements
 
@@ -68,4 +71,50 @@ SELECT * FROM read_parquet('data/raw/RELIANCE_1min.parquet') LIMIT 5;
 
 **Kite limits:** ~3 req/sec; max 60 calendar days per 1-minute request; daily login required.
 
-**Never commit:** `.env`, `.kite_session`, or `data/raw/`.
+## Day 2: Bar indicators from 1-minute OHLCV
+
+Convert each stock's raw 1-minute candles into analyzable indicator columns. Stocks are processed one at a time (never load all ~27M rows into memory). Raw Parquet files are left unchanged.
+
+| Script | Purpose |
+|---|---|
+| `src/data/build_bar_indicators.py` | Compute indicators, validate, write processed Parquet |
+| `src/data/kite_ohlcv.py` | Shared Parquet I/O (reused from Day 1) |
+
+**Indicators:** returns (1/5/15/30/60m), candle range/body/ratios, volume change & SMA ratios, SMA (5/20/50/200), intraday VWAP + distance, rolling volatility (20/60), RSI (14).
+
+**How each is calculated** (on 1-minute bars; windows are bar counts unless noted):
+
+**Session boundaries:** Rolling and shift-based indicators are computed **within each trading session** (calendar date of `timestamp`). They never carry values from the previous session into the next — e.g. `return_5m` at today's open does not use yesterday's close, and `sma_20` uses the prior 20 one-minute bars **within the same session only**. VWAP resets at the start of each session.
+
+| Column | Calculation |
+|---|---|
+| `return_Nm` | `(close / close.shift(N)) - 1` for N = 1, 5, 15, 30, 60; **within session** |
+| `candle_range` | `high - low` |
+| `candle_body` | `close - open` |
+| `body_ratio` | `abs(close - open) / (high - low)`; NaN if range is 0 |
+| `close_position` | `(close - low) / (high - low)`; NaN if range is 0 |
+| `volume_change_1m` | `(volume / volume.shift(1)) - 1`; **within session** |
+| `volume_sma_20` | rolling mean of `volume` over 20 bars **within session** |
+| `volume_ratio_20` | `volume / volume_sma_20`; NaN if SMA is 0 |
+| `sma_W` | rolling mean of `close` over W = 5, 20, 50, 200 bars **within session** |
+| `vwap` | intraday cumulative: `sum(typical_price * volume) / sum(volume)` where `typical_price = (high + low + close) / 3`; resets each calendar day |
+| `distance_from_vwap` | `(close - vwap) / vwap`; NaN if VWAP is 0 |
+| `volatility_W` | rolling std of `return_1m` over W = 20, 60 bars **within session** |
+| `rsi_14` | Wilder RSI(14): EWM gains/losses with `alpha = 1/14`; **within session** |
+
+±Inf from zero denominators is replaced with NaN. Initial warm-up rows stay NaN (no forward-fill).
+
+**Output:** `data/processed/{SYMBOL}_1min_indicators.parquet` (gitignored)
+
+```bash
+.venv/bin/python -m src.data.build_bar_indicators
+.venv/bin/python -m src.data.build_bar_indicators --symbol RELIANCE
+```
+
+```sql
+SELECT * FROM read_parquet('data/processed/RELIANCE_1min_indicators.parquet') LIMIT 5;
+```
+
+**Rules:** sort by timestamp; no look-ahead; no forward-fill; warm-up NaNs kept; original OHLCV preserved; indicators reset at each trading-session boundary. Re-runs overwrite processed files (no duplication).
+
+**Never commit:** `.env`, `.kite_session`, `data/raw/`, or `data/processed/`.
