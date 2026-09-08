@@ -74,3 +74,6 @@ backtests/*.joblib
 # Logs
 *.log
 logs/
+
+# Day 4 predictive-analysis generated outputs (reports/results stay local; see README to reproduce)
+reports/day4_predictive_analysis/
