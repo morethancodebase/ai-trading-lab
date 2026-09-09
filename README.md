@@ -8,6 +8,7 @@ Local Python workspace for NSE research.
 - [Day 2](#day-2-bar-indicators-from-1-minute-ohlcv): Bar indicators from 1-minute OHLCV
 - [Day 3](#day-3-future-return-targets-and-date-splits): Future-return targets and date splits
 - [Day 4](#day-4-predictive-analysis-of-bar-indicators): Predictive analysis of bar indicators
+- [Day 5](#day-5-signal-discovery-from-predictive-relationships): Signal discovery from predictive relationships
 
 No ML, strategy discovery, backtesting, or live trading yet.
 
@@ -232,3 +233,74 @@ These are **associations**, not strategies. No trading rule has been created. An
 **Rules:** every indicator is backward-looking (within-session); `future_return_*` targets are never used as inputs; every load/query filters `date ≤ VALIDATION_END` and a hard guard asserts no row has `date ≥ TEST_START` (2026-03-04); decile edges are fit on TRAIN only and reused verbatim on VALIDATION; discovery and ranking use TRAIN only. Re-runs overwrite the outputs (no duplication).
 
 **Never commit:** `.env`, `.kite_session`, `data/raw/`, `data/processed/`, or `reports/day4_predictive_analysis/` (generated Day 4 outputs).
+
+## Day 5: Signal discovery from predictive relationships
+
+Day 4 found weak but **persistent** associations between several bar indicators and the 5-minute future return (notably `close_position`, `return_1m`, `return_5m`, `candle_body` — all negative, i.e. short-term mean reversion). Day 5 asks the natural next question: **can those weak relationships be converted into simple, interpretable directional signals (LONG / SHORT / NO SIGNAL) that show useful behaviour on unseen VALIDATION data?** This is exploratory signal discovery — **no ML, no strategy, no backtest, no profitability claim.**
+
+| Script | Purpose |
+|---|---|
+| `src/analysis/signal_discovery.py` | Build directional signals from Day-4 relationships; freeze TRAIN thresholds; score TRAIN + VALIDATION; never read TEST |
+| `src/analysis/generate_signal_report.py` | Build a self-contained HTML report from the CSV/JSON outputs |
+
+**How signals are built**
+
+- Target horizon: `future_return_5m` only — Day 4's clearest persistent finding. Other horizons are intentionally **not** scanned, to avoid "which horizon looks best" data mining.
+- Candidate inputs: `close_position`, `return_1m`, `return_5m`, `candle_body`, `rsi_14`, `distance_from_vwap`, `volume_ratio_20`.
+- **Thresholds are per-stock TRAIN percentiles (10 / 25 / 75 / 90), frozen, then applied unchanged to that stock's VALIDATION rows.** Per-stock thresholds are required because `candle_body` and `distance_from_vwap` are in price units and are not cross-sectionally comparable across the 100 stocks (the same reason Day 4 used per-stock deciles). No threshold is ever recomputed on VALIDATION.
+- **Direction is data-driven from Day 4**: a negative Day-4 per-stock-mean association → high value = SHORT, low value = LONG (reversal); a positive association → the opposite. Nothing is re-fit.
+- **13 signals declared a priori** (not selected by validation performance): 7 extreme singles (10/90), 2 moderate singles (25/75) as a threshold-sensitivity check, and 4 extreme combinations that require indicators to **agree** on direction.
+- For each signal, on both TRAIN and VALIDATION: signal count (long / short), hit rate, average & median **raw** expected return (bps), % positive, average |move|, signal frequency, per-stock consistency, and time-of-day. Returns are **RAW basis points** before brokerage, taxes, slippage, spread, and market impact.
+
+**Output:** `reports/day5_signal_discovery/` (gitignored) — `signal_summary.csv`, `signal_by_stock.csv`, `signal_by_time.csv`, `signal_train_vs_val.csv`, `frozen_thresholds.csv` (leakage audit), `run_summary.json`, `report.html`.
+
+### Running Day 5 Analysis
+
+Reads each stock's `data/processed/{SYMBOL}_1min_targets.parquet` (Day 3) and writes to `reports/day5_signal_discovery/` (created automatically; gitignored). Run from the project root:
+
+```bash
+.venv/bin/python -m src.analysis.signal_discovery                  # full 100-stock run (~20s)
+.venv/bin/python -m src.analysis.signal_discovery --limit-stocks 5 # quick smoke test
+.venv/bin/python -m src.analysis.generate_signal_report            # build report.html from the outputs
+```
+
+Only `pandas` / `numpy` / `duckdb` are used (already in the project stack).
+
+### What we found (100 NIFTY-100 stocks; 17.64M TRAIN / 4.49M VALIDATION scorable rows; TEST never read)
+
+**11 of 13** declared signals persisted (positive raw expected return in both TRAIN and VALIDATION, val/train ratio ≥ 0.5, and ≥ 1,000 VALIDATION signals); **12 of 13** had a positive raw expected return on VALIDATION. The weak Day-4 mean-reversion association does convert into a directional signal that **generalises in direction**.
+
+| Signal | TRAIN ret (bps) | VAL ret (bps) | Val/Train | VAL hit | Persist |
+|---|---:|---:|---:|---:|:---:|
+| C1 `close_position & return_1m agree` | +1.57 | +1.21 | 0.77 | 53.8% | ✓ |
+| C3 `close_position & candle_body agree` | +1.55 | +1.19 | 0.77 | 53.8% | ✓ |
+| C2 `close_position & return_5m agree` | +1.52 | +1.09 | 0.72 | 53.3% | ✓ |
+| C4 ≥2 of {close_position,return_1m,return_5m} agree | +1.26 | +0.96 | 0.76 | 53.1% | ✓ |
+| S1 `close_position` extreme | +1.06 | +0.79 | 0.74 | 52.1% | ✓ |
+| S2 `return_1m` extreme | +0.90 | +0.69 | 0.76 | 52.2% | ✓ |
+| S4 `candle_body` extreme | +0.88 | +0.67 | 0.77 | 52.2% | ✓ |
+| S3 `return_5m` extreme | +0.65 | +0.48 | 0.73 | 51.3% | ✓ |
+| S5 `rsi_14` extreme | +0.33 | +0.25 | 0.76 | 50.6% | ✓ |
+| S6 `distance_from_vwap` extreme | −0.01 | −0.07 | — | 48.5% | ✗ |
+| S7 `volume_ratio_20` extreme | +0.21 | +0.10 | 0.50 | 48.2% | ✗ |
+
+- **Combinations amplify the per-signal edge and still persist.** Requiring two indicators to agree on direction roughly **doubles** the per-signal expected return (C1/C3 ≈ +1.2 bps on VALIDATION vs +0.7–0.8 bps for the best singles) and lifts the hit rate to ~53.4–53.8% — at the cost of firing far less often (C1: 251k VALIDATION signals vs S1: 1.58M). This is a classic precision-vs-frequency trade-off, **not** a free lunch.
+- **The strongest Day-4 relationship leads the strongest signal.** `close_position` is in every top combination and is the strongest single — consistent, not surprising.
+- **Weaker Day-4 candidates fail, exactly as their effect sizes warned.** `distance_from_vwap` (Day-4 psm ≈ −0.004) goes **negative** on VALIDATION and is rejected; `volume_ratio_20` (Day-4 psm ≈ +0.006, the only momentum-signed candidate) is at best borderline (val/train ratio 0.50). `rsi_14` and `return_5m` persist only weakly (~+0.25 / +0.48 bps).
+- **Threshold sensitivity is mild.** The moderate (25/75) variants of `close_position` and `return_1m` persist with similar val/train ratios (0.77 / 0.82) but slightly lower per-signal return and ~3× more signals — the edge is not an artifact of one arbitrary threshold.
+
+These are **directional associations that generalise**, not a trading strategy. No position sizing, costs, or execution have been modelled.
+
+### Important limitations (read before any "edge" claim)
+
+- **Raw returns are tiny.** The best signal is ~+1.2 bps per signal on VALIDATION; realistic Indian intraday round-trip costs (brokerage ~2–3 bps + STT + spread + slippage + impact) can easily exceed this. **Nothing here is profitable until a proper cost-aware backtest proves it.**
+- **Hit rates are barely above 50%** (50.6%–53.8%) — a real but weak directional tilt, consistent with Day-4's |psm| ≤ 0.04.
+- **Statistical interest ≠ usefulness ≠ profitability.** We deliberately separate these: "statistically interesting" = persists in direction; "potentially useful" = combinations amplify and persist (unproven); "profitable" = **not claimed** — that requires a future cost-aware backtest on the untouched TEST period.
+- **Per-stock thresholds** are required (price-unit indicators); each stock is scored on its own TRAIN distribution — a design choice, not a validation-tuned knob.
+- **Multiple testing / overfitting.** 13 signals × several metrics were examined; the a-priori declaration and the held-out VALIDATION persistence check are the main safeguards, but treat rankings as exploratory.
+- **Survivorship / regime.** Today's NIFTY 100 universe; VALIDATION was lower-volatility than TRAIN, so some val/train ratios partly reflect denominator shrinkage.
+- **Single horizon, linear/monotonic signals only.** No interaction modelling beyond "agreement"; no other horizons tested.
+
+**Rules:** every indicator is backward-looking (within-session); `future_return_*` targets are never used as inputs (only to score a signal after it fires); every load/query filters `date ≤ VALIDATION_END` and a hard guard asserts no row has `date ≥ TEST_START` (2026-03-04); thresholds are per-stock TRAIN percentiles, frozen before any VALIDATION row is scored; signals are declared a priori and nothing is optimised against VALIDATION. Re-runs overwrite the outputs (no duplication).
+
+**Never commit:** `.env`, `.kite_session`, `data/raw/`, `data/processed/`, `reports/day4_predictive_analysis/`, or `reports/day5_signal_discovery/` (generated Day 4–5 outputs).

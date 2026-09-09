@@ -77,3 +77,6 @@ logs/
 
 # Day 4 predictive-analysis generated outputs (reports/results stay local; see README to reproduce)
 reports/day4_predictive_analysis/
+
+# Day 5 signal-discovery generated outputs (reports/results stay local; see README to reproduce)
+reports/day5_signal_discovery/
