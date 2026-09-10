@@ -80,3 +80,18 @@ reports/day4_predictive_analysis/
 
 # Day 5 signal-discovery generated outputs (reports/results stay local; see README to reproduce)
 reports/day5_signal_discovery/
+
+# Day 6 cost-aware backtest generated outputs (reports/results stay local; see README to reproduce)
+reports/day6_backtest/
+
+# Day 9 trend-continuation: source .py is committed; generated results stay local.
+reports/day9_trend_continuation/*.csv
+reports/day9_trend_continuation/*.html
+reports/day9_trend_continuation/*.json
+reports/day9_trend_continuation/charts_*/
+
+# Day 10 trend-continuation parameterized runner: source committed; results local.
+reports/day10_trend_continuation/*.csv
+reports/day10_trend_continuation/*.html
+reports/day10_trend_continuation/*.json
+reports/day10_trend_continuation/charts_*/
