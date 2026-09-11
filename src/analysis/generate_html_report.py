@@ -156,7 +156,7 @@ def summary(s):
     return f"<section><h2>Run summary</h2><div class='cards'>{cards}</div>{nla}</section>"
 
 
-def top_rel(df):
+def top_rel(df, s):
     scale = max(df["train_pearson_psm"].abs().max(), df["val_pearson_psm"].abs().max()) * 1.15
 
     def bar(v, cls):
@@ -194,7 +194,7 @@ def top_rel(df):
     return (
         "<section><h2>Top relationships — ranked by |TRAIN per-stock-mean Pearson|</h2>"
         "<p class='lead'>Diverging bars from centre: left = negative (reversal), right = positive. "
-        "PSM = mean of per-stock correlations, robust to the differing price scales of the 100 stocks "
+        f"PSM = mean of per-stock correlations, robust to the differing price scales of the {s['stocks_processed']} stocks "
         "(naive pooled correlation is in the CSVs but is misleading for level indicators).</p>"
         f"{chart}<h3>Detail</h3>{table}</section>"
     )
@@ -386,7 +386,7 @@ def build():
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
         "<title>Day 4 — Predictive Analysis</title>"
         f"<style>{CSS}</style></head><body><div class='wrap'>"
-        f"{header(s)}{summary(s)}{top_rel(strong)}{distributions(dist)}"
+        f"{header(s)}{summary(s)}{top_rel(strong, s)}{distributions(dist)}"
         f"{deciles(dec, strong)}{timeofday(tod, strong)}{findings(strong, s)}{caveats(s, dist, dec)}"
         f"<footer>Generated {s['generated_at']} · src.analysis.predictive_analysis · "
         "No TEST data read · stdlib-only statistics</footer>"

@@ -18,7 +18,7 @@ Design / research rules
   check persistence, never to select indicators.
 * Cross-sectional awareness: pooled (naive, concatenate-all-stocks) results are
   reported, but the primary correlation metric is the mean of per-stock
-  correlations, which is robust to the differing price scales of the 100 stocks.
+  correlations, which is robust to the differing price scales of the stocks.
   Level indicators (vwap, sma_*, candle_range/body, volume_sma_20) are flagged so
   naive-pooled correlations for them are read with their cross-sectional caveat.
 * Statistical significance is reported (correlation p-value, decile-bucket
@@ -69,7 +69,7 @@ PROCESSED_DIR = ROOT / "data" / "processed"
 REPORTS_DIR = ROOT / "reports" / "day4_predictive_analysis"
 
 # Indicators stored in absolute price / volume units. Their naive-pooled
-# correlation across 100 stocks is partly driven by cross-sectional price-scale
+# correlation across the stock universe is partly driven by cross-sectional price-scale
 # differences and is therefore not directly comparable to per-stock correlations.
 LEVEL_INDICATORS = {
     "vwap",
