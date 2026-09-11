@@ -98,6 +98,12 @@ def main() -> int:
                     help="Trail mode (default be = breakeven at 2R)")
     ap.add_argument("--not-before", default="09:45", help="Earliest entry HH:MM (default 09:45)")
     ap.add_argument("--not-after", default="13:00", help="Latest entry HH:MM (default 13:00)")
+    ap.add_argument("--no-long", action="store_true",
+                    help="Skip LONG setups (shorts only) -- longs had no gross edge in-sample")
+    ap.add_argument("--no-short", action="store_true",
+                    help="Skip SHORT setups (longs only)")
+    ap.add_argument("--skip-lunch", default=None,
+                    help="Skip entries in a lunch lull, format HH:MM-HH:MM (e.g. 11:30-12:30)")
     ap.add_argument("--no-open", action="store_true", help="Do not open the report in the browser")
     args = ap.parse_args()
 
@@ -108,10 +114,25 @@ def main() -> int:
     not_before = _parse_time(args.not_before)
     not_after = _parse_time(args.not_after)
 
+    # Optional avoidable-pattern filters (Day-11 loss analysis).
+    skip_lunch_start = skip_lunch_end = None
+    if args.skip_lunch:
+        a, b = args.skip_lunch.split("-")
+        skip_lunch_start = _parse_time(a.strip())
+        skip_lunch_end = _parse_time(b.strip())
+
     notional_txt = "no cap" if max_notional is None else f"cap Rs {max_notional:,.0f}"
+    filters = []
+    if args.no_long:
+        filters.append("no-long")
+    if args.no_short:
+        filters.append("no-short")
+    if args.skip_lunch:
+        filters.append(f"skip-lunch {args.skip_lunch}")
+    filters_txt = (", " + ", ".join(filters)) if filters else ""
     label = args.label or (
         f"CUSTOM ({args.not_before}-{args.not_after} window, {notional_txt}, "
-        f"risk Rs {args.risk:,.0f}/trade, trail-{args.trail} at 2R)"
+        f"risk Rs {args.risk:,.0f}/trade, trail-{args.trail} at 2R{filters_txt})"
     )
 
     # Point the shared engine + chart generator at the requested window and the
@@ -121,6 +142,10 @@ def main() -> int:
     eng.END_DATE = args.end
     eng.RISK_PER_TRADE = args.risk
     eng.NOT_AFTER = not_after
+    eng.ALLOW_LONG = not args.no_long
+    eng.ALLOW_SHORT = not args.no_short
+    eng.SKIP_LUNCH_START = skip_lunch_start
+    eng.SKIP_LUNCH_END = skip_lunch_end
     eng.OUT_DIR = DAY10
     charts.OUT_DIR = DAY10
 
@@ -132,6 +157,8 @@ def main() -> int:
     print(f"Window: {args.start} .. {args.end}  |  Stocks: {len(stocks)}")
     print(f"Risk/trade: Rs {args.risk:,.0f}  |  Max notional: {notional_txt}  "
           f"|  entry {args.not_before}-{args.not_after}  |  trail: {args.trail}")
+    if filters:
+        print(f"Avoidable-pattern filters: {', '.join(filters)}")
     print(f"Output suffix: {suffix}  ->  {DAY10}")
     print("=" * 72)
 

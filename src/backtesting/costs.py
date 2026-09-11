@@ -8,8 +8,9 @@ legs. All components are configurable.
 ``ZERO_COST`` disables every component (the gross-edge baseline, matching the
 Day 5 convention that returns were reported raw, before any costs).
 ``DEFAULT_COST`` uses Zerodha's current equity-intraday (NSE) statutory
-charges (brokerage, STT, exchange, SEBI, stamp, GST) plus a 1 bps/leg
-slippage assumption (market impact, not a Zerodha charge).
+charges only (brokerage, STT, exchange, SEBI, stamp, GST). Slippage defaults
+to 0 -- it is a market-impact assumption, not a Zerodha charge; set
+``slippage_bps > 0`` on a custom ``CostModel`` to add one.
 
 Costs are computed per round-trip on the actual entry/exit leg values
 (qty x price), so they scale with notional and with the small price drift
@@ -56,8 +57,9 @@ class CostModel:
     gst_pct: float = 0.18
     # Slippage per leg, in bps (bid/ask spread + market impact). Applied to both
     # the entry and exit leg values. This is a market-impact ASSUMPTION, not a
-    # Zerodha statutory charge; set it to 0 to match Zerodha's fee table exactly.
-    slippage_bps: float = 1.0
+    # Zerodha statutory charge; it defaults to 0 so DEFAULT_COST matches Zerodha's
+    # fee table exactly. Set it > 0 to add a slippage / market-impact assumption.
+    slippage_bps: float = 0.0
 
     def round_trip_cost(self, direction, entry_value, exit_value):
         """Total rupee cost of one round-trip trade (scalar or numpy arrays).
@@ -135,8 +137,8 @@ ZERO_COST = CostModel(
     slippage_bps=0.0,
 )
 
-# Zerodha current equity-intraday (NSE) statutory charges -- brokerage
+# Zerodha current equity-intraday (NSE) statutory charges only -- brokerage
 # (Rs 20 or 0.03%/order, whichever lower), STT 0.025% sell-side, NSE txn
-# 0.00307%, SEBI Rs 10/crore, stamp 0.003% buy-side, GST 18% -- plus a
-# 1 bps/leg slippage assumption (market impact, not a Zerodha charge).
+# 0.00307%, SEBI Rs 10/crore, stamp 0.003% buy-side, GST 18%. No slippage /
+# market-impact assumption (slippage_bps defaults to 0).
 DEFAULT_COST = CostModel()

@@ -70,6 +70,12 @@ BIG_CANDLE_MULT = 2.0           # bounce candle range > 2x ATR14 -> skip
 ATR_WINDOW = 14
 NOT_BEFORE = dtime(9, 45)        # never trade before 09:45 (baseline)
 NOT_AFTER = dtime(13, 0)        # never enter a trade after 13:00 (1 pm)
+# Optional avoidable-pattern filters (Day-11 loss analysis). Defaults keep the
+# original strategy behaviour; the custom runner flips them from the CLI.
+ALLOW_LONG = True               # if False, long setups are skipped (shorts only)
+ALLOW_SHORT = True              # if False, short setups are skipped (longs only)
+SKIP_LUNCH_START = None         # if set, no entries in [START, END) lunch window
+SKIP_LUNCH_END = None           #   (e.g. 11:30-12:30 -- low follow-through volume)
 EXIT_BAR_OPEN = dtime(15, 10)    # exit at close of the 15:10 5-min candle (~15:15)
 LOOKBACK = 5                     # "4-5 candles far away" run before the bounce
 ABOVE_VWAP_MIN = 4              # at least 4 of the LOOKBACK candles on trend side
@@ -383,12 +389,22 @@ def simulate_stock(sym: str, df: pd.DataFrame) -> list[dict]:
                 s = -1
             else:
                 continue
+            # Optional direction gate (avoidable-pattern filter).
+            if s == 1 and not ALLOW_LONG:
+                continue
+            if s == -1 and not ALLOW_SHORT:
+                continue
             if not check_filters(s, i, cl, hi, lo, vwap, dist, day_open, atr, rng, times, is_green):
                 continue
             if i >= exit_idx:            # no room to enter before the time-stop
                 continue
             tr = simulate_setup(sym, s, date, i, arrs, exit_idx)
             if tr is not None:
+                # Optional lunch-lull skip on the actual ENTRY fill time
+                # (matches the loss analysis, which bucketed by entry_time).
+                if (SKIP_LUNCH_START is not None and SKIP_LUNCH_END is not None
+                        and SKIP_LUNCH_START <= pd.Timestamp(tr["entry_time"]).time() < SKIP_LUNCH_END):
+                    continue
                 trades.append(tr)
                 done = True
     return trades
@@ -515,6 +531,9 @@ def write_artifacts(tdf: pd.DataFrame, daily: pd.DataFrame, monthly: pd.DataFram
             "extend_min_dist": EXTEND_MIN_DIST, "gap_min_atr": GAP_MIN_ATR,
             "require_green_bounce": REQUIRE_GREEN_BOUNCE,
             "trail_mode": TRAIL_MODE,
+            "allow_long": ALLOW_LONG, "allow_short": ALLOW_SHORT,
+            "skip_lunch_start": (None if SKIP_LUNCH_START is None else str(SKIP_LUNCH_START)),
+            "skip_lunch_end": (None if SKIP_LUNCH_END is None else str(SKIP_LUNCH_END)),
         },
         "overall": overall,
         "monthly": monthly.to_dict("records"),
@@ -697,37 +716,39 @@ def _section_monthly(monthly: pd.DataFrame) -> str:
 
 
 def _section_costs() -> str:
-    """Cost-model table reconciled to Zerodha's current equity-intraday (NSE) charges."""
-    bd = COST.round_trip_breakdown(1, 1000000.0, 1000000.0)  # Rs 10L buy + Rs 10L sell
+    """Cost-model table reconciled to Zerodha's current equity-intraday (NSE) charges.
+
+    Worked example: Rs 10L buy + Rs 10L sell (turnover Rs 20L), 1 buy + 1 sell order --
+    matches Zerodha's published NSE equity-intraday fee table exactly (slippage excluded).
+    """
+    buy, sell = 1000000.0, 1000000.0          # Rs 10L buy + Rs 10L sell
+    bd = COST.round_trip_breakdown(1, buy, sell)
     comp = [
-        ("Brokerage", "Rs 20 or 0.03%/order, whichever lower (per leg)", float(bd["brokerage"])),
-        ("STT", "0.025% of sell value (sell side only)", float(bd["stt"])),
-        ("Exchange (NSE txn)", "0.00307% of turnover (both legs)", float(bd["exchange"])),
-        ("SEBI", "Rs 10/crore of turnover", float(bd["sebi"])),
-        ("Stamp duty", "0.003% of buy value (buy side only)", float(bd["stamp"])),
-        ("GST", "18% on (brokerage + exchange + SEBI)", float(bd["gst"])),
-        ("Slippage", "1 bps/leg (model assumption, not a Zerodha charge)", float(bd["slippage"])),
+        ("Brokerage", "\u20b920 buy + \u20b920 sell", float(bd["brokerage"])),
+        ("STT", "0.025% \u00d7 \u20b910L sell", float(bd["stt"])),
+        ("NSE transaction charges", "0.00307% \u00d7 \u20b920L", float(bd["exchange"])),
+        ("SEBI charges", "\u20b910/crore \u00d7 \u20b920L", float(bd["sebi"])),
+        ("Stamp duty", "0.003% \u00d7 \u20b910L buy", float(bd["stamp"])),
+        ("GST", f"18% \u00d7 (\u20b9{bd['brokerage']:.0f} + \u20b9{bd['exchange']:.2f} + \u20b9{bd['sebi']:.0f})", float(bd["gst"])),
+        ("Slippage", "excluded -- Zerodha statutory charges only (no market-impact assumption)", float(bd["slippage"])),
     ]
     body = "".join(
         f'<tr><td class="l">{name}</td><td class="l">{rate}</td><td>{_inr(amt)}</td></tr>'
         for name, rate, amt in comp
     )
-    statutory = (bd["brokerage"] + bd["stt"] + bd["exchange"] + bd["sebi"]
-                 + bd["stamp"] + bd["gst"])
     body += (
-        f'<tr style="font-weight:700;border-top:2px solid #bcccdc"><td class="l">Statutory total</td>'
-        f'<td class="l">Zerodha equity-intraday charges</td><td>{_inr(statutory)}</td></tr>'
-        f'<tr style="font-weight:700"><td class="l">Total incl. slippage</td>'
-        f'<td class="l">round-trip cost applied per trade</td><td>{_inr(bd["total"])}</td></tr>'
+        f'<tr style="font-weight:700;border-top:2px solid #bcccdc"><td class="l">Total charges</td>'
+        f'<td class="l">Zerodha equity-intraday round-trip (no slippage assumption)</td><td>{_inr(bd["total"])}</td></tr>'
     )
-    head = ('<tr><th class="l">Component</th><th class="l">Rate (Zerodha NSE equity intraday)</th>'
-            '<th>Rs on Rs 10L buy + Rs 10L sell</th></tr>')
+    head = ('<tr><th class="l">Charge</th><th class="l">Calculation (Zerodha NSE equity intraday)</th>'
+            '<th>Amount on \u20b910L buy + \u20b910L sell</th></tr>')
     return (
         '<section id="costs"><h2>Cost Model &mdash; Zerodha equity-intraday (NSE)</h2>'
-        '<p class="small">Worked example: Rs 10,00,000 buy + Rs 10,00,000 sell (turnover Rs 20L). '
-        "Statutory components match Zerodha&#39;s current charges (verified against zerodha.com/charges). "
-        'Slippage (1 bps/leg) is a separate market-impact assumption, shown in its own column; '
-        "set it to 0 in src/backtesting/costs.py to match Zerodha&#39;s fee table exactly.</p>"
+        '<p class="small">Worked example: \u20b910,00,000 buy + \u20b910,00,000 sell (turnover \u20b920L), '
+        "1 buy + 1 sell order. Statutory components match Zerodha&#39;s current charges "
+        "(verified against zerodha.com/charges). Slippage is excluded (set to 0 in "
+        "src/backtesting/costs.py) so the model matches Zerodha&#39;s fee table exactly -- "
+        "statutory charges only, no market-impact assumption.</p>"
         f'<table><thead>{head}</thead><tbody>{body}</tbody></table></section>'
     )
 
@@ -818,8 +839,15 @@ def _section_notes(cfg: dict) -> str:
         "Pin bar / hammer and green bounce candle are recorded as quality flags (not mandatory -- 'preferable' / 'good sign').",
         sizing,
         f"Max {cfg['max_trades_per_day']} trades/calendar day -- first entries by entry time; later setups skipped (as a trader stops trading).",
-        "Charges: full Indian-equity round-trip costs (brokerage, STT, exchange, SEBI, stamp, GST, slippage) via src/backtesting/costs.py.",
+        "Charges: Zerodha equity-intraday round-trip costs (brokerage, STT, exchange, SEBI, stamp, GST) via src/backtesting/costs.py. Slippage / market-impact assumption is excluded (slippage_bps = 0).",
     ]
+    # Avoidable-pattern filters applied to this run (Day-11 loss analysis).
+    if not cfg.get("allow_long", True):
+        bullets.append("DIRECTION FILTER: LONG setups DISABLED (shorts only) -- the long side showed no gross edge in the in-sample loss analysis.")
+    if not cfg.get("allow_short", True):
+        bullets.append("DIRECTION FILTER: SHORT setups DISABLED (longs only).")
+    if cfg.get("skip_lunch_start") and cfg.get("skip_lunch_end"):
+        bullets.append(f"TIME FILTER: no new entries during the lunch lull {cfg['skip_lunch_start']}-{cfg['skip_lunch_end']} -- Indian lunch-hour volume dries up and VWAP bounces lack follow-through.")
     lim = [
         "Candle-based execution with no intrabar look-ahead; if a stop and opposite stop can both trigger in one candle, the conservative fill (SL hit) is assumed.",
         "VWAP for the bounce test is sampled at the 5-min candle close (a small approximation vs per-minute VWAP).",
@@ -904,6 +932,9 @@ def run_variant(label, suffix, notional, trail_mode, not_before, cached):
         "extend_min_dist": EXTEND_MIN_DIST, "gap_min_atr": GAP_MIN_ATR,
         "require_green_bounce": REQUIRE_GREEN_BOUNCE,
         "trail_mode": TRAIL_MODE,
+        "allow_long": ALLOW_LONG, "allow_short": ALLOW_SHORT,
+        "skip_lunch_start": (None if SKIP_LUNCH_START is None else str(SKIP_LUNCH_START)),
+        "skip_lunch_end": (None if SKIP_LUNCH_END is None else str(SKIP_LUNCH_END)),
     }
     summary = {"config": cfg, "overall": overall}
     write_artifacts(tdf, daily, monthly, overall, len(trading_days))
