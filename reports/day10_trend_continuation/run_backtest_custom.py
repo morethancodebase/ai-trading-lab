@@ -173,6 +173,7 @@ def main() -> int:
     print(f"  {report}")
     print(f"  {journal}")
     print(f"  {DAY10 / ('daily_summary' + suffix + '.csv')}")
+    print(f"  {DAY10 / ('monthly_summary' + suffix + '.csv')}")
     print(f"  {DAY10 / ('run_summary' + suffix + '.json')}")
     print(f"  {chart_dir}/  (per-trade chart PNGs)")
     print("=" * 72)

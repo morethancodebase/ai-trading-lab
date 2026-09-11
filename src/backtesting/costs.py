@@ -7,8 +7,9 @@ legs. All components are configurable.
 
 ``ZERO_COST`` disables every component (the gross-edge baseline, matching the
 Day 5 convention that returns were reported raw, before any costs).
-``DEFAULT_COST`` uses representative FY2024-25 Indian equity intraday rates
-(conservative; see the per-field notes, especially the STT caveat).
+``DEFAULT_COST`` uses Zerodha's current equity-intraday (NSE) statutory
+charges (brokerage, STT, exchange, SEBI, stamp, GST) plus a 1 bps/leg
+slippage assumption (market impact, not a Zerodha charge).
 
 Costs are computed per round-trip on the actual entry/exit leg values
 (qty x price), so they scale with notional and with the small price drift
@@ -34,27 +35,28 @@ class CostModel:
     intraday rates and are deliberately conservative.
     """
 
-    # Brokerage: flat rupees per executed order (entry and exit are two
-    # orders). Discount brokers (e.g. Zerodha) charge Rs 20/order or 0.03% of
-    # turnover, whichever is lower; for a Rs 1,00,000 notional 0.03% = Rs 30,
-    # so the flat Rs 20 applies. We model the flat per-order fee.
+    # Brokerage per executed order, Zerodha equity intraday: Rs 20 per order OR
+    # 0.03% of the order value, whichever is lower (applied to BOTH the entry
+    # and exit legs). For a Rs 1,00,000 leg, 0.03% = Rs 30 > Rs 20, so the flat
+    # Rs 20 applies; for very small legs (< ~Rs 66,667) the 0.03% cap is lower.
     brokerage_per_order: float = 20.0
-    # STT (Securities Transaction Tax) on the SELL leg, in bps. Equity intraday
-    # sell was 0.025% (2.5 bps) historically and was raised to 0.1% (10 bps)
-    # effective 2024-10-01 (Budget 2024). Our 2023-2026 sample straddles that
-    # change; we use the higher post-2024 rate as a conservative constant.
-    stt_bps: float = 10.0
-    # Exchange transaction charge (NSE) on turnover (both legs), bps per leg.
-    # Equity intraday ~ 0.00325% = 0.325 bps per leg.
-    exchange_bps: float = 0.325
-    # SEBI turnover fee: rupees per Rs 1 crore (1e7) of turnover.
+    brokerage_pct: float = 0.0003        # 0.03% per order (the "whichever lower" cap)
+    # STT (Securities Transaction Tax) on the SELL leg, in bps. Zerodha's
+    # current equity-intraday STT is 0.025% (2.5 bps) on the sell side. (The
+    # 0.1% rate applies to equity DELIVERY, not intraday.)
+    stt_bps: float = 2.5
+    # Exchange transaction charge (NSE) on turnover, in bps of (entry+exit)
+    # turnover. Zerodha's current NSE equity-intraday txn charge is 0.00307%.
+    exchange_bps: float = 0.307
+    # SEBI turnover fee: rupees per Rs 1 crore (1e7) of turnover. Rs 10/crore.
     sebi_per_crore: float = 10.0
     # Stamp duty on the BUY leg, in bps. Equity intraday ~ 0.003% = 0.3 bps.
     stamp_bps: float = 0.3
     # GST on (brokerage + exchange + SEBI), as a fraction. 18%.
     gst_pct: float = 0.18
     # Slippage per leg, in bps (bid/ask spread + market impact). Applied to both
-    # the entry and exit leg values.
+    # the entry and exit leg values. This is a market-impact ASSUMPTION, not a
+    # Zerodha statutory charge; set it to 0 to match Zerodha's fee table exactly.
     slippage_bps: float = 1.0
 
     def round_trip_cost(self, direction, entry_value, exit_value):
@@ -70,7 +72,8 @@ class CostModel:
         sell_value = np.where(direction == 1.0, exit_value, entry_value)
         buy_value = np.where(direction == 1.0, entry_value, exit_value)
         turnover = entry_value + exit_value
-        brokerage = 2.0 * self.brokerage_per_order
+        brokerage = np.minimum(self.brokerage_per_order, self.brokerage_pct * entry_value) \
+            + np.minimum(self.brokerage_per_order, self.brokerage_pct * exit_value)
         stt = self.stt_bps / 1e4 * sell_value
         exchange = self.exchange_bps / 1e4 * turnover
         sebi = self.sebi_per_crore / 1e7 * turnover
@@ -87,7 +90,8 @@ class CostModel:
         sell_value = exit_value if direction == 1.0 else entry_value
         buy_value = entry_value if direction == 1.0 else exit_value
         turnover = entry_value + exit_value
-        brokerage = 2.0 * self.brokerage_per_order
+        brokerage = (min(self.brokerage_per_order, self.brokerage_pct * entry_value)
+                     + min(self.brokerage_per_order, self.brokerage_pct * exit_value))
         stt = self.stt_bps / 1e4 * sell_value
         exchange = self.exchange_bps / 1e4 * turnover
         sebi = self.sebi_per_crore / 1e7 * turnover
@@ -108,6 +112,7 @@ class CostModel:
     def params(self) -> dict:
         return {
             "brokerage_per_order": self.brokerage_per_order,
+            "brokerage_pct": self.brokerage_pct,
             "stt_bps": self.stt_bps,
             "exchange_bps": self.exchange_bps,
             "sebi_per_crore": self.sebi_per_crore,
@@ -121,6 +126,7 @@ class CostModel:
 # the Day 5 "no costs" convention).
 ZERO_COST = CostModel(
     brokerage_per_order=0.0,
+    brokerage_pct=0.0,
     stt_bps=0.0,
     exchange_bps=0.0,
     sebi_per_crore=0.0,
@@ -129,5 +135,8 @@ ZERO_COST = CostModel(
     slippage_bps=0.0,
 )
 
-# Representative FY2024-25 Indian equity intraday rates (conservative).
+# Zerodha current equity-intraday (NSE) statutory charges -- brokerage
+# (Rs 20 or 0.03%/order, whichever lower), STT 0.025% sell-side, NSE txn
+# 0.00307%, SEBI Rs 10/crore, stamp 0.003% buy-side, GST 18% -- plus a
+# 1 bps/leg slippage assumption (market impact, not a Zerodha charge).
 DEFAULT_COST = CostModel()

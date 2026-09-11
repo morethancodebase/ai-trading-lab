@@ -427,6 +427,33 @@ def build_daily(tdf: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def build_monthly(tdf: pd.DataFrame) -> pd.DataFrame:
+    """One row per calendar month (YYYY-MM): trades, gross/charges/net, cum net."""
+    cols = ["month", "n_trades", "n_long", "n_short", "gross_pnl", "charges",
+            "net_pnl", "cum_net", "win_rate", "best_trade", "worst_trade"]
+    if tdf.empty:
+        return pd.DataFrame(columns=cols)
+    rows = []
+    cum = 0.0
+    month_key = tdf["date"].astype(str).str[:7]
+    for month, g in tdf.groupby(month_key, sort=True):
+        gross = float(g["gross_pnl"].sum())
+        ch = float(g["charges_total"].sum())
+        net = float(g["net_pnl"].sum())
+        cum += net
+        n = len(g)
+        wins = int((g["net_pnl"] > 0).sum())
+        rows.append({
+            "month": month, "n_trades": n,
+            "n_long": int((g["direction"] == "LONG").sum()),
+            "n_short": int((g["direction"] == "SHORT").sum()),
+            "gross_pnl": gross, "charges": ch, "net_pnl": net,
+            "cum_net": float(cum), "win_rate": wins / n if n else 0.0,
+            "best_trade": float(g["net_pnl"].max()), "worst_trade": float(g["net_pnl"].min()),
+        })
+    return pd.DataFrame(rows, columns=cols)
+
+
 def build_overall(tdf: pd.DataFrame, daily: pd.DataFrame, trading_days: set) -> dict:
     net = tdf["net_pnl"]
     wins = tdf[net > 0]
@@ -470,9 +497,11 @@ def build_overall(tdf: pd.DataFrame, daily: pd.DataFrame, trading_days: set) -> 
     }
 
 
-def write_artifacts(tdf: pd.DataFrame, daily: pd.DataFrame, overall: dict, trading_days: int):
+def write_artifacts(tdf: pd.DataFrame, daily: pd.DataFrame, monthly: pd.DataFrame,
+                    overall: dict, trading_days: int):
     tdf.to_csv(OUT_DIR / f"trade_journal{OUT_SUFFIX}.csv", index=False)
     daily.to_csv(OUT_DIR / f"daily_summary{OUT_SUFFIX}.csv", index=False)
+    monthly.to_csv(OUT_DIR / f"monthly_summary{OUT_SUFFIX}.csv", index=False)
     summary = {
         "config": {
             "strategy": "VWAP Trend Continuation (5-min)",
@@ -488,6 +517,7 @@ def write_artifacts(tdf: pd.DataFrame, daily: pd.DataFrame, overall: dict, tradi
             "trail_mode": TRAIL_MODE,
         },
         "overall": overall,
+        "monthly": monthly.to_dict("records"),
     }
     with (OUT_DIR / f"run_summary{OUT_SUFFIX}.json").open("w") as f:
         json.dump(summary, f, indent=2, default=str)
@@ -645,6 +675,63 @@ def _section_daily(daily: pd.DataFrame) -> str:
     head = ("<tr><th class='l'>Date</th><th>Trades</th><th>Long</th><th>Short</th>"
             "<th>Gross P&L</th><th>Charges</th><th>Net P&L</th><th>Cum. Net</th><th>Win%</th></tr>")
     return f'<section id="daily"><h2>Daily Summary</h2><table><thead>{head}</thead><tbody>{rows}</tbody></table></section>'
+
+
+def _section_monthly(monthly: pd.DataFrame) -> str:
+    if monthly.empty:
+        return '<section id="monthly"><h2>Monthly Summary</h2><p class="small">No trades.</p></section>'
+    rows = ""
+    for _, r in monthly.iterrows():
+        cls = "pos" if r["net_pnl"] >= 0 else "neg"
+        ccls = "pos" if r["cum_net"] >= 0 else "neg"
+        rows += (
+            f'<tr><td class="l">{r["month"]}</td><td>{int(r["n_trades"])}</td>'
+            f'<td>{int(r["n_long"])}</td><td>{int(r["n_short"])}</td>'
+            f'<td>{_inr(r["gross_pnl"])}</td><td class="muted">{_inr(r["charges"])}</td>'
+            f'<td class="{cls}"><b>{_inr_signed(r["net_pnl"])}</b></td>'
+            f'<td class="{ccls}">{_inr_signed(r["cum_net"])}</td><td>{r["win_rate"] * 100:.0f}%</td></tr>'
+        )
+    head = ("<tr><th class='l'>Month</th><th>Trades</th><th>Long</th><th>Short</th>"
+            "<th>Gross P&L</th><th>Charges</th><th>Net P&L</th><th>Cum. Net</th><th>Win%</th></tr>")
+    return f'<section id="monthly"><h2>Monthly Summary (net profit / loss by month)</h2><table><thead>{head}</thead><tbody>{rows}</tbody></table></section>'
+
+
+def _section_costs() -> str:
+    """Cost-model table reconciled to Zerodha's current equity-intraday (NSE) charges."""
+    bd = COST.round_trip_breakdown(1, 1000000.0, 1000000.0)  # Rs 10L buy + Rs 10L sell
+    comp = [
+        ("Brokerage", "Rs 20 or 0.03%/order, whichever lower (per leg)", float(bd["brokerage"])),
+        ("STT", "0.025% of sell value (sell side only)", float(bd["stt"])),
+        ("Exchange (NSE txn)", "0.00307% of turnover (both legs)", float(bd["exchange"])),
+        ("SEBI", "Rs 10/crore of turnover", float(bd["sebi"])),
+        ("Stamp duty", "0.003% of buy value (buy side only)", float(bd["stamp"])),
+        ("GST", "18% on (brokerage + exchange + SEBI)", float(bd["gst"])),
+        ("Slippage", "1 bps/leg (model assumption, not a Zerodha charge)", float(bd["slippage"])),
+    ]
+    body = "".join(
+        f'<tr><td class="l">{name}</td><td class="l">{rate}</td><td>{_inr(amt)}</td></tr>'
+        for name, rate, amt in comp
+    )
+    statutory = (bd["brokerage"] + bd["stt"] + bd["exchange"] + bd["sebi"]
+                 + bd["stamp"] + bd["gst"])
+    body += (
+        f'<tr style="font-weight:700;border-top:2px solid #bcccdc"><td class="l">Statutory total</td>'
+        f'<td class="l">Zerodha equity-intraday charges</td><td>{_inr(statutory)}</td></tr>'
+        f'<tr style="font-weight:700"><td class="l">Total incl. slippage</td>'
+        f'<td class="l">round-trip cost applied per trade</td><td>{_inr(bd["total"])}</td></tr>'
+    )
+    head = ('<tr><th class="l">Component</th><th class="l">Rate (Zerodha NSE equity intraday)</th>'
+            '<th>Rs on Rs 10L buy + Rs 10L sell</th></tr>')
+    return (
+        '<section id="costs"><h2>Cost Model &mdash; Zerodha equity-intraday (NSE)</h2>'
+        '<p class="small">Worked example: Rs 10,00,000 buy + Rs 10,00,000 sell (turnover Rs 20L). '
+        "Statutory components match Zerodha&#39;s current charges (verified against zerodha.com/charges). "
+        'Slippage (1 bps/leg) is a separate market-impact assumption, shown in its own column; '
+        "set it to 0 in src/backtesting/costs.py to match Zerodha&#39;s fee table exactly.</p>"
+        f'<table><thead>{head}</thead><tbody>{body}</tbody></table></section>'
+    )
+
+
 def _section_journal(tdf: pd.DataFrame) -> str:
     df = tdf.copy()
     df["et"] = pd.to_datetime(df["entry_time"]).dt.strftime("%H:%M")
@@ -746,9 +833,10 @@ def _section_notes(cfg: dict) -> str:
         '<h2 style="margin-top:14px">Rules implemented (exactly as specified)</h2><ul style="font-size:13px">' + bl + "</ul>"
         '<h2 style="margin-top:14px">Assumptions & limitations</h2><ul style="font-size:13px">' + ll + "</ul></section>"
     )
-def build_html(tdf, daily, overall, summary):
+def build_html(tdf, daily, monthly, overall, summary):
     cfg = summary["config"]
-    nav = ('<nav class="nav"><a href="#summary">Summary</a><a href="#equity">Equity</a>'
+    nav = ('<nav class="nav"><a href="#summary">Summary</a><a href="#costs">Costs</a>'
+           '<a href="#equity">Equity</a><a href="#monthly">Monthly</a>'
            '<a href="#daily">Daily</a><a href="#journal">Journal</a><a href="#notes">Methodology</a></nav>')
     notional_txt = "no notional cap" if cfg.get("max_notional") is None else f"max notional Rs {cfg['max_notional']:,.0f}"
     header = (
@@ -758,7 +846,8 @@ def build_html(tdf, daily, overall, summary):
         f' &bull; trail={TRAIL_MODE} &bull; max {MAX_TRADES_PER_DAY} trades/day &bull; {len(tdf)} trades'
         f' over {overall["days_traded"]} days (of {overall["total_trading_days"]} trading days in window)</div>'
     )
-    parts = [nav, header, _section_summary(overall, tdf), _section_equity(daily),
+    parts = [nav, header, _section_summary(overall, tdf), _section_costs(),
+             _section_equity(daily), _section_monthly(monthly),
              _section_daily(daily), _section_journal(tdf), _section_notes(cfg)]
     foot = ('<p class="small" style="margin-top:30px">Generated by reports/day9_trend_continuation/run_backtest_v2.py. '
             'Report and data artifacts live under reports/day9_trend_continuation/ which is untracked (not committed).</p>')
@@ -802,6 +891,7 @@ def run_variant(label, suffix, notional, trail_mode, not_before, cached):
     tdf = tdf.sort_values(["date", "entry_time", "symbol"]).reset_index(drop=True)
     tdf["trade_no"] = range(1, len(tdf) + 1)
     daily = build_daily(tdf)
+    monthly = build_monthly(tdf)
     overall = build_overall(tdf, daily, trading_days)
     cfg = {
         "strategy": "VWAP Trend Continuation (5-min)", "variant": label,
@@ -816,8 +906,8 @@ def run_variant(label, suffix, notional, trail_mode, not_before, cached):
         "trail_mode": TRAIL_MODE,
     }
     summary = {"config": cfg, "overall": overall}
-    write_artifacts(tdf, daily, overall, len(trading_days))
-    html = build_html(tdf, daily, overall, summary)
+    write_artifacts(tdf, daily, monthly, overall, len(trading_days))
+    html = build_html(tdf, daily, monthly, overall, summary)
     (OUT_DIR / f"trend_continuation_report{OUT_SUFFIX}.html").write_text(html, encoding="utf-8")
     pf = "inf" if overall["profit_factor"] == float("inf") else f"{overall['profit_factor']:.2f}"
     print(f"  Trades: {overall['total_trades']}  |  Win: {overall['win_rate']*100:.1f}%  |  Net: {_inr_signed(overall['final_net'])}")
